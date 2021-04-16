@@ -694,6 +694,44 @@ public class ReactorOfficialTest {
                 .verifyComplete();
     }
 
+    /**
+     * One of the big technical challenges encountered when switching from an imperative programming perspective to
+     * a reactive programming mindset lies in how you deal with threading.
+     * 当从命令式编程的角度转换到反应式编程的思路时，
+     * 遇到的一大技术挑战就在于如何处理线程。
+     * <p>
+     * Contrary to what you might be used to, in reactive programming,
+     * you can use a Thread to process several asynchronous sequences that run at roughly the same time (actually, in non-blocking locksteps).
+     * The execution can also easily and often jump from one thread to another.
+     * 与你可能习惯的情况相反，在反应式编程中，
+     * 你可以使用一个Thread来处理多个异步序列， 这些序列大致在同一时间运行（实际上是以非阻塞锁步的方式）。
+     * 执行时也可以很容易地经常从一个线程跳转到另一个线程
+     * <p>
+     * This arrangement is especially hard for developers that use features dependent on the threading model being more “stable,” such as ThreadLocal.
+     * As it lets you associate data with a thread, it becomes tricky to use in a reactive context.
+     * As a result, libraries that rely on ThreadLocal at least introduce new challenges when used with Reactor.
+     * At worst, they work badly or even fail.
+     * Using the MDC of Logback to store and log correlation IDs is a prime example of such a situation.
+     * 对于使用依赖于线程模型更 "稳定 "的特性的开发者来说，这种安排尤其困难，比如ThreadLocal。
+     * 由于它让你将数据与线程关联起来，所以在反应式上下文中使用起来就变得很棘手。
+     * 因此，依赖ThreadLocal的库在与Reactor一起使用时，至少会带来新的挑战。
+     * 在最坏的情况下，它们会工作得很糟糕，甚至失败。
+     * 使用Logback的MDC来存储和记录相关ID就是这种情况的一个典型例子
+     * <p>
+     * The usual workaround for ThreadLocal usage is to move the contextual data, C, along your business data, T, in the sequence,
+     * by using (for instance) Tuple2<T, C>.
+     * This does not look good and leaks an orthogonal concern (the contextual data) into your method and Flux signatures.
+     * 对于ThreadLocal的使用，通常的变通方法是通过使用（例如）Tuple2<T，C>，沿着你的业务数据T，顺序移动上下文数据，C。
+     * 这看起来并不好，而且会将一个正交的关注点（上下文数据）泄露到你的方法和 Flux 签名中
+     * <p>
+     * Since version 3.1.0, Reactor comes with an advanced feature that is somewhat comparable to ThreadLocal but
+     * can be applied to a Flux or a Mono instead of a Thread. This feature is called Context.
+     * 自3.1.0版本以来，Reactor自带了一个高级功能，它与ThreadLocal有些相似，
+     * 但可以应用于Flux或Mono而不是Thread。这个功能叫做Context
+     * <p>
+     * As an illustration of what it looks like, the following example both reads from and writes to Context:
+     * 为了说明它是什么样子的，下面的例子既从Context中读取，又向Context写入
+     */
     @Test
     public void contextSimple6() {
         //use of two-space indentation on purpose to maximise readability in refguide
@@ -716,22 +754,34 @@ public class ReactorOfficialTest {
     //use of two-space indentation on purpose to maximise readability in refguide
     static final String HTTP_CORRELATION_ID = "reactive.http.library.correlationId";
 
+    /**
+     * As the preceding snippets show, the user code uses subscriberContext to populate a Context with an HTTP_CORRELATION_ID key-value pair.
+     * The upstream of the operator is a Mono<Tuple2<Integer, String>> (a simplistic representation of an HTTP response) returned by the HTTP client library.
+     * So it effectively passes information from the user code to the library code.
+     * 如前面的片段所示，用户代码使用subscriberContext来填充一个带有HTTP_CORRELATION_ID键值对的Context。
+     * 操作符的上游是HTTP客户端库返回的Mono<Tuple2<Integer，String>>（HTTP响应的简单化表示）。
+     * 所以它有效地将信息从用户代码传递给库代码
+     * <p>
+     * The following example shows mock code from the library’s perspective that reads the context and
+     * “augments the request” if it can find the correlation ID
+     * 下面的例子显示了从库的角度读取上下文的模拟代码，
+     * 如果它能找到相关ID，就会 "增强请求"
+     */
     Mono<Tuple2<Integer, String>> doPut(String url, Mono<String> data) {
         Mono<Tuple2<String, Optional<Object>>> dataAndContext =
-                data.zipWith(Mono.deferContextual(c -> // <1>
-                        Mono.just(c.getOrEmpty(HTTP_CORRELATION_ID))) // <2>
+                data.zipWith(Mono.deferContextual(c -> // <1> Materialize the ContextView through Mono.deferContextual and…​
+                        Mono.just(c.getOrEmpty(HTTP_CORRELATION_ID))) // <2> within the defer, extract a value for the correlation ID key, as an Optional.
                 );
 
         return dataAndContext.<String>handle((dac, sink) -> {
-            if (dac.getT2().isPresent()) { // <3>
+            if (dac.getT2().isPresent()) { // <3> If the key was present in the context, use the correlation ID as a header.
                 sink.next("PUT <" + dac.getT1() + "> sent to " + url +
                         " with header X-Correlation-ID = " + dac.getT2().get());
             } else {
                 sink.next("PUT <" + dac.getT1() + "> sent to " + url);
             }
             sink.complete();
-        })
-                .map(msg -> Tuples.of(200, msg));
+        }).map(msg -> Tuples.of(200, msg));
     }
 
     //use of two-space indentation on purpose to maximise readability in refguide
@@ -748,6 +798,24 @@ public class ReactorOfficialTest {
                 .verifyComplete();
     }
 
+    /**
+     * The library snippet zips the data Mono with Mono.deferContextual(Mono::just).
+     * This gives the library a Tuple2<String, ContextView>,
+     * and that context contains the HTTP_CORRELATION_ID entry from downstream (as it is on the direct path to the subscriber).
+     * 该库片段用Mono.deferContextual(Mono::just)对数据Mono进行压缩。
+     * 这就给库提供了一个Tuple2<String，ContextView>，
+     * 该上下文包含了来自下游的HTTP_CORRELATION_ID条目（因为它在通往订阅者的直接路径上）
+     * <p>
+     * The library code then uses map to extract an Optional<String> for that key, and,
+     * if the entry is present, it uses the passed correlation ID as a X-Correlation-ID header.
+     * That last part is simulated by the handle.
+     * 然后，库代码使用map为该键提取一个Optional<String>，
+     * 如果该条目存在，则使用传递的相关ID作为X-correlation-ID头。
+     * 最后这部分是由句柄模拟出来的
+     * <p>
+     * The whole test that validates the library code used the correlation ID can be written as follows
+     * 整个验证库代码使用了相关ID的测试可以写成如下
+     */
     @Test
     public void contextForLibraryReactivePutNoContext() {
         //use of two-space indentation on purpose to maximise readability in refguide
